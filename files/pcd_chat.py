@@ -1,13 +1,5 @@
 """
 pcd_chat.py — Claude AI assistant: tools + chat endpoints.
-
-Importing this module registers the chat routes on `pcd_state.app`:
-  POST /api/chat         — single Claude tool-runner turn
-  POST /api/chat/reset   — clear the conversation history
-  GET  /api/chat/status  — SDK / API key availability check
-
-Each @beta_tool function below is a thin wrapper around the same internal
-helpers the HTTP endpoints use, so the agent has parity with the UI buttons.
 """
 
 import json
@@ -27,7 +19,7 @@ from pcd_log import logger
 from pcd_shell import ps_full
 from pcd_state import _chat_history, _chat_lock, _lock, _refresh_state_controls, _state, app
 
-import pcd_state  # KNOWN_PLAN_GUIDS accessed at call time
+import pcd_state
 
 try:
     import anthropic
@@ -40,22 +32,9 @@ except ModuleNotFoundError:
         return f
 
 
-# ─── Claude tools ───
-
-
 @beta_tool
 def get_pc_state() -> str:
-    """Get the current PC state: temperatures, GPU info, storage, battery,
-    CPU performance counters, and active control settings.
-
-    Always call this first when the user asks a question or requests a change,
-    so you know the current state before deciding what to do.
-
-    Returns a JSON string with system identity, live sensor readings (CPU/skin
-    thermal zones, NVIDIA telemetry, NVMe temperatures, battery), and the
-    currently active power plan, overlay, cooling policy, turbo mode, CPU
-    max/min percent, and GPU power limit.
-    """
+    """Get the current PC state as JSON."""
     with _lock:
         snapshot = {
             "system":     _state.get("system", {}),
@@ -68,27 +47,18 @@ def get_pc_state() -> str:
 
 @beta_tool
 def list_power_plans() -> str:
-    """List every Windows power plan registered on this machine, including
-    custom (OEM/IT-managed) plans. Use this to find the GUID needed for
-    set_power_plan.
-
-    Returns a JSON list of {guid, name, active} entries.
-    """
+    """List Windows power plans as JSON."""
     return json.dumps(read_power_plans())
 
 
 @beta_tool
 def set_power_plan(guid: str) -> str:
-    """Switch the active Windows power plan by GUID.
-
-    Args:
-        guid: 36-character power-plan GUID from list_power_plans.
-    """
+    """Switch the active power plan by GUID."""
     g = guid.strip().lower()
     if not GUID_RE.match(g):
         return f"error: invalid GUID format: {guid}"
     if pcd_state.KNOWN_PLAN_GUIDS and g not in pcd_state.KNOWN_PLAN_GUIDS:
-        return "error: unknown plan GUID — call list_power_plans first"
+        return "error: unknown plan GUID"
     rc, _, err = ps_full(f"powercfg /setactive {g}")
     _refresh_state_controls()
     return "ok" if rc == 0 else f"failed: {err}"
@@ -96,11 +66,7 @@ def set_power_plan(guid: str) -> str:
 
 @beta_tool
 def set_power_mode(mode: str) -> str:
-    """Set the Windows 11 Power Mode overlay.
-
-    Args:
-        mode: One of 'best-efficiency', 'balanced', or 'best-performance'.
-    """
+    """Set Win11 Power Mode overlay (best-efficiency / balanced / best-performance)."""
     m = mode.strip().lower()
     if m not in OVERLAY_GUIDS:
         return f"error: mode must be one of {list(OVERLAY_GUIDS.keys())}"
@@ -111,15 +77,9 @@ def set_power_mode(mode: str) -> str:
 
 @beta_tool
 def set_cooling_policy(value: int) -> str:
-    """Set the System Cooling Policy. This is the biggest fan-noise lever on
-    laptops: Passive throttles the CPU before the fans spin up; Active prefers
-    to spin fans first to keep the CPU at full performance.
-
-    Args:
-        value: 0 for Passive (quiet), 1 for Active (fans first).
-    """
+    """Set System Cooling Policy: 0=Passive, 1=Active."""
     if value not in (0, 1):
-        return "error: value must be 0 (Passive) or 1 (Active)"
+        return "error: value must be 0 or 1"
     ok, err = _apply_proc_value(SYSCOOLPOL, value)
     _refresh_state_controls()
     return "ok" if ok else f"failed: {err}"
@@ -127,14 +87,9 @@ def set_cooling_policy(value: int) -> str:
 
 @beta_tool
 def set_turbo_boost(mode: int) -> str:
-    """Set the Processor Boost Mode.
-
-    Args:
-        mode: 0=Disabled, 1=Enabled, 2=Aggressive, 3=Efficient Enabled,
-              4=Efficient Aggressive, 5=Aggressive at guaranteed.
-    """
+    """Set Processor Boost Mode (0=Disabled .. 5=Aggressive at guaranteed)."""
     if not isinstance(mode, int) or not 0 <= mode <= 5:
-        return "error: mode must be an integer 0..5"
+        return "error: mode must be 0..5"
     ok, err = _apply_proc_value(PERFBOOSTMODE, mode)
     _refresh_state_controls()
     return "ok" if ok else f"failed: {err}"
@@ -142,14 +97,9 @@ def set_turbo_boost(mode: int) -> str:
 
 @beta_tool
 def set_cpu_max_percent(percent: int) -> str:
-    """Set the CPU maximum performance state as a percent of full speed.
-    99% disables turbo. 80% noticeably caps power and drops fan speed.
-
-    Args:
-        percent: integer 30..100.
-    """
+    """Set CPU maximum performance state (30..100)."""
     if not isinstance(percent, int) or not 30 <= percent <= 100:
-        return "error: percent must be an integer 30..100"
+        return "error: 30..100"
     ok, err = _apply_proc_value(PROCTHROTTLEMAX, percent)
     _refresh_state_controls()
     return "ok" if ok else f"failed: {err}"
@@ -157,13 +107,9 @@ def set_cpu_max_percent(percent: int) -> str:
 
 @beta_tool
 def set_cpu_min_percent(percent: int) -> str:
-    """Set the CPU minimum performance state as a percent of full speed.
-
-    Args:
-        percent: integer 5..100.
-    """
+    """Set CPU minimum performance state (5..100)."""
     if not isinstance(percent, int) or not 5 <= percent <= 100:
-        return "error: percent must be an integer 5..100"
+        return "error: 5..100"
     ok, err = _apply_proc_value(PROCTHROTTLEMIN, percent)
     _refresh_state_controls()
     return "ok" if ok else f"failed: {err}"
@@ -171,14 +117,9 @@ def set_cpu_min_percent(percent: int) -> str:
 
 @beta_tool
 def set_gpu_power_limit_watts(watts: int) -> str:
-    """Set the NVIDIA GPU power limit in watts. Use get_pc_state to read the
-    valid range (controls.gpu.min_w to controls.gpu.max_w).
-
-    Args:
-        watts: integer 5..300, within the GPU's supported range.
-    """
+    """Set NVIDIA GPU power limit in watts (5..300)."""
     if not isinstance(watts, int) or not 5 <= watts <= 300:
-        return "error: watts must be an integer 5..300"
+        return "error: 5..300"
     ok, err = _set_gpu_power(watts)
     _refresh_state_controls()
     return "ok" if ok else f"failed: {err}"
@@ -186,22 +127,15 @@ def set_gpu_power_limit_watts(watts: int) -> str:
 
 @beta_tool
 def apply_preset(name: str) -> str:
-    """Apply a composite preset that adjusts cooling policy, turbo, CPU cap,
-    GPU power limit, and Windows Power Mode at once.
-
-    Args:
-        name: 'quiet' (passive cooling, turbo off, 80% CPU cap, GPU at min, best-efficiency overlay),
-              'balanced' (active cooling, aggressive turbo, 100% CPU, GPU default, balanced overlay),
-              or 'performance' (active, aggressive, 100% min/max, GPU max, best-performance overlay).
-    """
+    """Apply composite preset: 'quiet', 'balanced', or 'performance'."""
     n = name.strip().lower()
     if n not in ("quiet", "balanced", "performance"):
-        return "error: name must be 'quiet', 'balanced', or 'performance'"
+        return "error: 'quiet'/'balanced'/'performance'"
 
     gpu = read_gpu_power_info()
     errors: list[str] = []
 
-    def step(ok: bool, err):
+    def step(ok, err):
         if not ok and err:
             errors.append(err)
 
@@ -219,7 +153,7 @@ def apply_preset(name: str) -> str:
         if gpu and gpu.get("default_w"):
             step(*_set_gpu_power(int(gpu["default_w"])))
         step(*set_power_overlay_api(OVERLAY_GUIDS["balanced"]))
-    else:  # performance
+    else:
         step(*_apply_proc_value(SYSCOOLPOL, 1))
         step(*_apply_proc_value(PERFBOOSTMODE, 2))
         step(*_apply_proc_value(PROCTHROTTLEMAX, 100))
@@ -235,33 +169,18 @@ def apply_preset(name: str) -> str:
 
 
 _CHAT_TOOLS = [
-    get_pc_state,
-    list_power_plans,
-    set_power_plan,
-    set_power_mode,
-    set_cooling_policy,
-    set_turbo_boost,
-    set_cpu_max_percent,
-    set_cpu_min_percent,
-    set_gpu_power_limit_watts,
-    apply_preset,
+    get_pc_state, list_power_plans, set_power_plan, set_power_mode,
+    set_cooling_policy, set_turbo_boost, set_cpu_max_percent,
+    set_cpu_min_percent, set_gpu_power_limit_watts, apply_preset,
 ]
-
-
-# ─── chat endpoints ───
 
 
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     if not _ANTHROPIC_AVAILABLE:
-        return jsonify({
-            "error": "anthropic SDK not installed. Run:  pip install anthropic"
-        }), 501
+        return jsonify({"error": "anthropic SDK not installed. pip install anthropic"}), 501
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return jsonify({
-            "error": "ANTHROPIC_API_KEY environment variable is not set. "
-                     "Get a key from https://console.anthropic.com and set it before launching the dashboard."
-        }), 501
+        return jsonify({"error": "ANTHROPIC_API_KEY not set"}), 501
 
     data = request.get_json(silent=True) or {}
     user_msg = (data.get("message") or "").strip()
@@ -280,8 +199,7 @@ def api_chat():
             model=ANTHROPIC_MODEL,
             max_tokens=8192,
             system=[
-                {"type": "text",
-                 "text": CHAT_SYSTEM_PROMPT,
+                {"type": "text", "text": CHAT_SYSTEM_PROMPT,
                  "cache_control": {"type": "ephemeral"}},
             ],
             tools=_CHAT_TOOLS,

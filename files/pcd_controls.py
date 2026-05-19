@@ -1,18 +1,5 @@
 """
 pcd_controls.py — read and write Windows power settings.
-
-Contains:
-  - powrprof.dll bindings for PowerSetActiveOverlayScheme (Win11 Power Mode)
-  - read_active_plan_guid / read_power_plans / read_power_overlay
-  - read_proc_value (+ registry fallback for hidden settings) / read_gpu_power_info
-  - _apply_proc_value / _set_gpu_power — the actual writers, each with
-    before/after read-back logging
-  - probe_controls — aggregator the poll loop calls every cycle
-
-The read_proc_value fallback is the load-bearing piece for hidden Win11
-settings (System Cooling Policy, Turbo Boost Mode): powercfg /query omits
-them from text output even after a successful write, so we read directly
-from the registry path powercfg /setacvalueindex writes to.
 """
 
 import ctypes
@@ -26,9 +13,6 @@ from pcd_config import (
 )
 from pcd_log import logger
 from pcd_shell import ps, ps_full, safe_float
-
-
-# ─── ctypes plumbing for the powrprof.dll overlay API ───
 
 
 class _GUID(ctypes.Structure):
@@ -59,10 +43,6 @@ def _guid_from_str(s: str) -> _GUID:
 
 
 def set_power_overlay_api(guid_str: str):
-    """Apply a Win11 power-mode overlay. Tries powrprof.dll's
-    PowerSetActiveOverlayScheme first (the only API that accepts the
-    all-zeros 'no overlay' GUID for Balanced). Falls back to re-activating
-    the current scheme via powercfg, which also clears overlays."""
     is_balanced = guid_str.replace("-", "").strip("{}") == "0" * 32
     name_for_log = next((k for k, v in OVERLAY_GUIDS.items() if v == guid_str), guid_str)
     logger.info("SET Power Mode overlay → %s (%s)", name_for_log, guid_str)
@@ -81,19 +61,13 @@ def set_power_overlay_api(guid_str: str):
     if is_balanced:
         active = read_active_plan_guid()
         if not active:
-            logger.error("  fallback failed: could not read active scheme")
             return False, "could not read active scheme"
         rc, _, err = ps_full(f"powercfg /setactive {active}")
     else:
         rc, _, err = ps_full(f"powercfg /setactive {guid_str}")
     if rc == 0:
-        logger.info("  overlay applied via powercfg fallback")
         return True, None
-    logger.error("  overlay write failed: %s", err)
     return False, err or "powercfg fallback failed"
-
-
-# ─── reading current state ───
 
 
 def read_active_plan_guid():
@@ -131,18 +105,10 @@ def read_power_overlay():
     for name, guid in OVERLAY_GUIDS.items():
         if raw == guid:
             return name
-    return raw  # unknown — return raw guid
+    return raw
 
 
 def _read_proc_value_from_registry(setting_guid: str):
-    """Fallback for processor sub-settings that powercfg /query refuses to show.
-
-    On Windows 11, System Cooling Policy (SYSCOOLPOL) and Turbo Boost Mode
-    (PERFBOOSTMODE) are 'hidden' advanced settings — the registry value exists
-    and powercfg /setacvalueindex writes to it successfully, but powercfg /query
-    omits them from its text output unless you've previously run
-    `powercfg /setattribute -ATTRIB_HIDE`. We read the value directly from the
-    same registry key that powercfg writes to."""
     if sys.platform != "win32":
         return None
     try:
@@ -167,10 +133,6 @@ def _read_proc_value_from_registry(setting_guid: str):
 
 
 def read_proc_value(setting_guid: str):
-    """Read a processor sub-setting. Tries powercfg /query first (works for
-    visible settings like CPU Max State); falls back to a direct registry
-    read so hidden settings (cooling policy, turbo mode) still produce
-    a value after a successful /setacvalueindex."""
     out = ps(f"powercfg /query SCHEME_CURRENT {SUB_PROCESSOR} {setting_guid}")
     patterns = [
         r"Current AC Power Setting Index:\s*0x([0-9a-f]+)",
@@ -212,13 +174,10 @@ def read_gpu_power_info():
 
 
 def probe_controls():
-    import pcd_state  # local import: cyclic with poll_loop
+    import pcd_state
     plans = read_power_plans()
     pcd_state.KNOWN_PLAN_GUIDS = {p["guid"] for p in plans}
     gpu = read_gpu_power_info()
-    # Flag GPU as locked when nvidia-smi reports identical min/max — the driver
-    # refuses limit changes on most laptop NVIDIA parts. The dashboard greys
-    # the slider in that case so it's clear the control is non-functional.
     if gpu and gpu.get("min_w") is not None and gpu.get("max_w") is not None:
         gpu["limit_locked"] = abs(gpu["min_w"] - gpu["max_w"]) < 0.5
     return {
@@ -233,17 +192,7 @@ def probe_controls():
     }
 
 
-# ─── writing settings ───
-
-
 def _apply_proc_value(setting_guid: str, value: int):
-    """Write a processor sub-setting and re-activate the scheme so it takes effect.
-
-    Captures and restores the Power Mode overlay across the /setactive call
-    (which would otherwise clear it). Logs a before-value, the three powercfg
-    commands, and a read-back after-value so the log is self-evident proof of
-    whether the change actually landed in the registry.
-    """
     name = proc_setting_name(setting_guid)
     before = read_proc_value(setting_guid)
     overlay_before = read_power_overlay()
@@ -266,8 +215,7 @@ def _apply_proc_value(setting_guid: str, value: int):
     if after == value:
         logger.info("VERIFY %s: %s → %s  OK", name, before, after)
     else:
-        logger.error("VERIFY %s: expected %s, read %s  MISMATCH (check admin / scheme)",
-                     name, value, after)
+        logger.error("VERIFY %s: expected %s, read %s  MISMATCH", name, value, after)
 
     err = (e1 + " " + e2).strip()
     return rc1 == 0 and rc2 == 0, err or None
@@ -285,17 +233,8 @@ def _set_gpu_power(watts: int):
         err = (r.stderr or out).strip()
         logger.error("  nvidia-smi rc=%d: %s", r.returncode, err[:200])
         return False, err
-    # nvidia-smi often returns rc=0 with a "not supported" warning instead of
-    # erroring — common on laptop GPUs where the vendor locks the limit. Surface
-    # this as a failure so the dashboard's toast/log reflects reality.
     if "not supported" in out.lower():
         msg = next((line.strip() for line in out.splitlines() if line.strip()), "limit not supported")
         logger.error("  nvidia-smi rejected the limit: %s", msg)
         return False, msg
-    logger.info("  nvidia-smi rc=0  stdout=%r", out.strip()[:160])
-    after = read_gpu_power_info() or {}
-    if after.get("limit_w") is not None and abs((after.get("limit_w") or 0) - watts) < 1:
-        logger.info("VERIFY GPU power limit: %s W → %s W  OK", before.get("limit_w"), after.get("limit_w"))
-    else:
-        logger.warning("VERIFY GPU power limit: requested %s W, read %s W", watts, after.get("limit_w"))
     return True, None

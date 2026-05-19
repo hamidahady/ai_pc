@@ -3,22 +3,21 @@ pcd_log.py — logger setup for pc_dashboard.
 
 At module import we only attach a console handler. The file handler is opened
 later via attach_log_file() — `main()` calls this once it has decided this
-process will actually run the dashboard (not a short-lived UAC parent or an
-install helper). Result: exactly one log_YYYYMMDD_HHMMSS.txt per real launch.
-
-Used by every other pcd_* module: `from pcd_log import logger`.
+process will actually run the dashboard. Result: exactly one
+log_YYYYMMDD_HHMMSS.txt per real launch.
 """
 
 import logging
 from datetime import datetime
 from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent
-LOG_FILE: Path | None = None  # populated by attach_log_file()
+# Logs go next to pc_dashboard.py (the parent of files/), not inside files/.
+LOG_DIR = Path(__file__).resolve().parent.parent
+LOG_FILE: Path | None = None
 
 logger = logging.getLogger("pc_dashboard")
 logger.setLevel(logging.DEBUG)
-logger.propagate = False  # don't double up via the root logger
+logger.propagate = False
 
 _console_h = logging.StreamHandler()
 _console_h.setLevel(logging.INFO)

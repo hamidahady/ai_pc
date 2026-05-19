@@ -1,11 +1,5 @@
 """
-pcd_probes.py — read-only monitoring probes.
-
-One function per data source. Each returns a JSON-serializable Python value.
-None of them depend on each other; the poll loop runs them all in sequence.
-
-Also owns the one-time WMI namespace walk (oem_discover) and the one-time
-system identity probe (probe_system_info).
+pcd_probes.py — read-only monitoring probes + startup-only probes.
 """
 
 import re
@@ -18,10 +12,7 @@ from pcd_config import (
 from pcd_log import logger
 from pcd_shell import ps, safe_float
 
-import pcd_state  # OEM_DISCOVERY accessed at call time
-
-
-# ─── one-time at startup: identify the machine ───
+import pcd_state
 
 
 def probe_system_info() -> dict:
@@ -49,9 +40,6 @@ def probe_system_info() -> dict:
     if ram_raw:
         info["ram_gb"] = round(ram_raw / (1024 ** 3), 1)
     return info
-
-
-# ─── one-time at startup: walk WMI for OEM/vendor sensor classes ───
 
 
 def oem_discover() -> list[tuple[str, str]]:
@@ -87,9 +75,6 @@ def oem_discover() -> list[tuple[str, str]]:
     return found
 
 
-# ─── live monitoring probes (called every REFRESH_S seconds) ───
-
-
 def probe_thermal_zones():
     out = ps(
         r"Get-Counter -Counter '\Thermal Zone Information(*)\Temperature' "
@@ -103,7 +88,6 @@ def probe_thermal_zones():
             continue
         name, temp = line.split("|", 1)
         v = safe_float(temp)
-        # Drop offline zones (0 K → about -273°C) and bogus near-zero values
         if v is not None and v > 5:
             sensors.append({"name": name.strip(), "value": v})
     return sensors
@@ -221,7 +205,6 @@ def probe_cpu_proxy():
             info["perf_pct"] = fv
         elif "processor frequency" in p:
             info["freq_mhz"] = fv
-    # Fallback for freq (the perf counter sometimes returns nothing on Win11)
     if "freq_mhz" not in info:
         raw = ps(
             "(Get-CimInstance Win32_Processor | "

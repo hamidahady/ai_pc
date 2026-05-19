@@ -1,23 +1,5 @@
 """
-pcd_api.py — Flask routes for the dashboard's monitoring and control endpoints.
-
-Importing this module registers all routes on `pcd_state.app`. The HTML index
-route lives in pc_dashboard.py because PAGE is owned by pcd_page.py; chat
-routes live in pcd_chat.py.
-
-Routes registered here:
-  GET  /api/thermal               — full state snapshot (polled every 2 s)
-  POST /api/control/powerplan     — switch active Windows power plan
-  POST /api/control/overlay       — set Win11 Power Mode overlay
-  POST /api/control/cooling-policy— set SYSCOOLPOL value (0 or 1)
-  POST /api/control/turbo         — set PERFBOOSTMODE (0..5)
-  POST /api/control/cpu-max       — set PROCTHROTTLEMAX (30..100)
-  POST /api/control/cpu-min       — set PROCTHROTTLEMIN (5..100)
-  POST /api/control/gpu-power     — set NVIDIA power limit in watts
-  POST /api/control/preset        — apply 'quiet'/'balanced'/'performance'
-
-Plus a before/after_request pair that logs every API hit (excluding the
-2-second polling GET, which would flood the file).
+pcd_api.py — Flask routes for monitoring and control endpoints.
 """
 
 import json
@@ -36,15 +18,11 @@ from pcd_log import logger
 from pcd_shell import ps_full
 from pcd_state import _lock, _refresh_state_controls, _state, app
 
-import pcd_state  # KNOWN_PLAN_GUIDS accessed at call time
-
-
-# ─── before/after_request logging hooks ───
+import pcd_state
 
 
 @app.before_request
 def _log_api_request():
-    # /api/thermal is the 2-second polling endpoint — too noisy to log.
     if request.path == "/api/thermal" or not request.path.startswith("/api/"):
         return
     body = request.get_json(silent=True) or {}
@@ -72,16 +50,10 @@ def _log_api_response(resp):
     return resp
 
 
-# ─── read endpoint ───
-
-
 @app.route("/api/thermal")
 def api_thermal():
     with _lock:
         return jsonify(_state)
-
-
-# ─── control endpoints ───
 
 
 @app.route("/api/control/powerplan", methods=["POST"])
@@ -168,15 +140,15 @@ def apply_preset():
 
     gpu = read_gpu_power_info()
     if name == "quiet":
-        step(*_apply_proc_value(SYSCOOLPOL, 0))            # passive cooling
-        step(*_apply_proc_value(PERFBOOSTMODE, 0))         # turbo off
-        step(*_apply_proc_value(PROCTHROTTLEMAX, 80))      # cap CPU @ 80%
+        step(*_apply_proc_value(SYSCOOLPOL, 0))
+        step(*_apply_proc_value(PERFBOOSTMODE, 0))
+        step(*_apply_proc_value(PROCTHROTTLEMAX, 80))
         if gpu and gpu.get("min_w"):
             step(*_set_gpu_power(int(gpu["min_w"])))
         step(*set_power_overlay_api(OVERLAY_GUIDS["best-efficiency"]))
     elif name == "balanced":
-        step(*_apply_proc_value(SYSCOOLPOL, 1))            # active cooling
-        step(*_apply_proc_value(PERFBOOSTMODE, 2))         # aggressive
+        step(*_apply_proc_value(SYSCOOLPOL, 1))
+        step(*_apply_proc_value(PERFBOOSTMODE, 2))
         step(*_apply_proc_value(PROCTHROTTLEMAX, 100))
         if gpu and gpu.get("default_w"):
             step(*_set_gpu_power(int(gpu["default_w"])))
