@@ -92,6 +92,11 @@ def main() -> None:
         _state["system"] = pcd_state.SYSTEM_INFO
 
     logger.info("Polling every %ss in background.", REFRESH_S)
+    try:
+        from pcd_vendor_detect import detect as _detect_vendor
+        _detect_vendor()
+    except Exception as e:
+        logger.warning("  vendor detect failed: %s", e)
     logger.info("OEM WMI discovery (one-time, may take ~10s):")
     try:
         pcd_state.OEM_DISCOVERY = oem_discover()

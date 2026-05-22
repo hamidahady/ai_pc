@@ -95,30 +95,17 @@ def probe_thermal_zones():
 
 
 def probe_nvidia():
-    try:
-        r = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=name,temperature.gpu,fan.speed,power.draw,"
-             "utilization.gpu,clocks.gr,clocks.mem",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except FileNotFoundError:
-        return []
-    gpus = []
-    for line in (r.stdout or "").strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 7:
-            gpus.append({
-                "name": parts[0],
-                "temp_c": safe_float(parts[1]),
-                "fan_pct": safe_float(parts[2]),
-                "power_w": safe_float(parts[3]),
-                "util_pct": safe_float(parts[4]),
-                "clock_gr_mhz": safe_float(parts[5]),
-                "clock_mem_mhz": safe_float(parts[6]),
-            })
-    return gpus
+    """Cross-vendor GPU telemetry. Name kept for backward-compat with
+    pcd_state and pcd_page_js, which read _state["sources"]["nvidia"].
+
+    Implementation delegates to the provider chain in pcd_providers_gpu:
+    NVIDIA via nvidia-smi → AMD WMI → Intel WMI → Windows Perf Counters.
+
+    On any non-NVIDIA machine you still get util% and VRAM via the
+    perf-counter fallback. On a machine where no provider yields data,
+    returns [] and the UI tile renders 'not available on this hardware'."""
+    from pcd_providers_gpu import get_gpu_metrics
+    return get_gpu_metrics()
 
 
 def probe_storage():
