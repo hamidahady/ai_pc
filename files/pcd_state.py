@@ -47,24 +47,35 @@ def poll_loop():
     from pcd_probes import (
         probe_thermal_zones, probe_nvidia, probe_storage,
         probe_battery, probe_cpu_proxy, probe_oem_sensors,
+        probe_system_load, probe_user_session, probe_power_requests,
     )
     from pcd_controls import probe_controls
 
     while True:
         try:
             snap = {
-                "thermal_zones": probe_thermal_zones(),
-                "nvidia":        probe_nvidia(),
-                "storage":       probe_storage(),
-                "battery":       probe_battery(),
-                "cpu_proxy":     probe_cpu_proxy(),
-                "oem":           probe_oem_sensors(),
+                "thermal_zones":   probe_thermal_zones(),
+                "nvidia":          probe_nvidia(),
+                "storage":         probe_storage(),
+                "battery":         probe_battery(),
+                "cpu_proxy":       probe_cpu_proxy(),
+                "oem":             probe_oem_sensors(),
+                "system_load":     probe_system_load(),
+                "user_session":    probe_user_session(),
+                "power_requests":  probe_power_requests(),
             }
             ctrl = probe_controls()
             with _lock:
                 _state["updated"] = datetime.now().isoformat(timespec="seconds")
                 _state["sources"] = snap
                 _state["controls"] = ctrl
+            # Optional diagnostic recorder — writes one line per sample to
+            # pc_status_*.txt when the user has it active. No-op when idle.
+            try:
+                from pcd_recorder import maybe_sample
+                maybe_sample()
+            except Exception as e:
+                logger.warning("recorder error: %s", e)
         except Exception as e:
             with _lock:
                 _state["error"] = str(e)

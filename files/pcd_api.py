@@ -21,9 +21,13 @@ from pcd_state import _lock, _refresh_state_controls, _state, app
 import pcd_state
 
 
+# Endpoints the UI polls every 2 seconds — too noisy to log every hit.
+_NOISY_POLL_PATHS = {"/api/thermal", "/api/recorder/status", "/api/optimizer/status"}
+
+
 @app.before_request
 def _log_api_request():
-    if request.path == "/api/thermal" or not request.path.startswith("/api/"):
+    if request.path in _NOISY_POLL_PATHS or not request.path.startswith("/api/"):
         return
     body = request.get_json(silent=True) or {}
     if body:
@@ -35,7 +39,7 @@ def _log_api_request():
 
 @app.after_request
 def _log_api_response(resp):
-    if request.path == "/api/thermal" or not request.path.startswith("/api/"):
+    if request.path in _NOISY_POLL_PATHS or not request.path.startswith("/api/"):
         return resp
     if request.method == "GET" and request.path not in ("/api/chat/status",):
         return resp
@@ -127,6 +131,71 @@ def set_gpu_power():
     ok, err = _set_gpu_power(int(val))
     _refresh_state_controls()
     return jsonify({"ok": ok, "error": err})
+
+
+# ─── AI auto-optimizer ───
+
+
+@app.route("/api/optimizer/start", methods=["POST"])
+def optimizer_start():
+    """Begin the auto-optimize loop. Body: {interval_minutes: float}."""
+    from pcd_optimizer import start
+    data = request.get_json(silent=True) or {}
+    try:
+        m = float(data.get("interval_minutes", 5))
+    except (TypeError, ValueError):
+        m = 5
+    return jsonify(start(m))
+
+
+@app.route("/api/optimizer/stop", methods=["POST"])
+def optimizer_stop():
+    from pcd_optimizer import stop
+    return jsonify(stop())
+
+
+@app.route("/api/optimizer/status", methods=["GET"])
+def optimizer_status():
+    from pcd_optimizer import status
+    return jsonify(status())
+
+
+@app.route("/api/optimizer/run-now", methods=["POST"])
+def optimizer_run_now():
+    """Fire one Claude decision right now (synchronous). The background
+    loop, if running, has its next scheduled tick reset."""
+    from pcd_optimizer import run_now
+    return jsonify(run_now())
+
+
+# ─── diagnostic recorder ───
+
+
+@app.route("/api/recorder/start", methods=["POST"])
+def recorder_start():
+    """Start writing one line per sample to pc_status_YYYYMMDD_HHMMSS.txt."""
+    from pcd_recorder import start
+    data = request.get_json(silent=True) or {}
+    interval = data.get("interval_s", 10)
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError):
+        interval = 10
+    return jsonify(start(interval))
+
+
+@app.route("/api/recorder/stop", methods=["POST"])
+def recorder_stop():
+    """Stop the current recording and close the file."""
+    from pcd_recorder import stop
+    return jsonify(stop())
+
+
+@app.route("/api/recorder/status", methods=["GET"])
+def recorder_status():
+    """Report whether a recording is active, plus elapsed time and sample count."""
+    from pcd_recorder import status
+    return jsonify(status())
 
 
 @app.route("/api/control/preset", methods=["POST"])

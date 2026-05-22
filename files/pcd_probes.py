@@ -2,6 +2,7 @@
 pcd_probes.py — read-only monitoring probes + startup-only probes.
 """
 
+import os
 import re
 import subprocess
 
@@ -214,6 +215,336 @@ def probe_cpu_proxy():
         if fv is not None:
             info["freq_mhz"] = fv
     return info
+
+
+def probe_system_load():
+    """One-shot Get-Counter that pulls memory %, disk I/O, network rates,
+    process count, and per-core CPU load — all in a single PowerShell call
+    to keep latency low. Returns a dict shaped like:
+
+        {
+          "memory_pct":        68.2,
+          "memory_avail_mb":   4923.0,
+          "disk_io_pct":       12.0,
+          "disk_read_kbps":    2048.0,
+          "disk_write_kbps":   5120.0,
+          "net_in_kbps":       120.0,
+          "net_out_kbps":      45.0,
+          "process_count":     412,
+          "cpu_cores_pct":     [3.2, 1.0, 8.5, ...],   # one per logical core
+          "cpu_core_max_pct":  23.8,
+          "cpu_core_avg_pct":  7.4,
+        }
+    """
+    out = ps(
+        r"Get-Counter -Counter "
+        r"'\Memory\% Committed Bytes In Use',"
+        r"'\Memory\Available MBytes',"
+        r"'\PhysicalDisk(_Total)\% Disk Time',"
+        r"'\PhysicalDisk(_Total)\Disk Read Bytes/sec',"
+        r"'\PhysicalDisk(_Total)\Disk Write Bytes/sec',"
+        r"'\Network Interface(*)\Bytes Received/sec',"
+        r"'\Network Interface(*)\Bytes Sent/sec',"
+        r"'\System\Processes',"
+        r"'\Processor Information(*)\% Processor Time' "
+        r"-ErrorAction SilentlyContinue | "
+        r"ForEach-Object { $_.CounterSamples } | "
+        r"ForEach-Object { '{0}|{1:N4}' -f $_.Path, $_.CookedValue }"
+    )
+    info = {}
+    cores = []
+    net_in_total = 0.0
+    net_out_total = 0.0
+    for line in out.splitlines():
+        if "|" not in line:
+            continue
+        path, v = line.split("|", 1)
+        fv = safe_float(v)
+        if fv is None:
+            continue
+        p = path.lower()
+        if "% committed bytes in use" in p:
+            info["memory_pct"] = round(fv, 1)
+        elif "available mbytes" in p:
+            info["memory_avail_mb"] = round(fv, 0)
+        elif "% disk time" in p:
+            info["disk_io_pct"] = round(fv, 1)
+        elif "disk read bytes/sec" in p:
+            info["disk_read_kbps"] = round(fv / 1024.0, 1)
+        elif "disk write bytes/sec" in p:
+            info["disk_write_kbps"] = round(fv / 1024.0, 1)
+        elif "bytes received/sec" in p:
+            # Sum across all network interfaces — skip loopback / virtual which
+            # are usually zero anyway.
+            if "loopback" not in p and "isatap" not in p:
+                net_in_total += fv
+        elif "bytes sent/sec" in p:
+            if "loopback" not in p and "isatap" not in p:
+                net_out_total += fv
+        elif "system\\processes" in p:
+            info["process_count"] = int(fv)
+        elif "% processor time" in p and "_total" not in p:
+            # Per-core load — keep them all so the recorder can report
+            # min/avg/max plus the worst single core (catches a busy-loop
+            # on one core that hides inside the _Total average).
+            cores.append(round(fv, 1))
+    info["net_in_kbps"] = round(net_in_total / 1024.0, 1)
+    info["net_out_kbps"] = round(net_out_total / 1024.0, 1)
+    if cores:
+        info["cpu_cores_pct"] = cores
+        info["cpu_core_max_pct"] = max(cores)
+        info["cpu_core_avg_pct"] = round(sum(cores) / len(cores), 1)
+    return info
+
+
+def probe_top_processes(n: int = 8) -> list[dict]:
+    """Top N CPU-consuming processes, with Windows service-name resolution.
+
+    Returns a list of dicts shaped like:
+        {
+          "name":                 "sspservice",            # exe basename
+          "cpu_pct":              49.3,                    # % across all cores
+          "pid":                  4521,                    # primary PID (or None)
+          "service_name":         "SophosEPDS",            # EXACT Set-Service name
+          "service_display_name": "Sophos Endpoint Defense Service",
+        }
+
+    `service_name` / `service_display_name` are populated when at least one
+    of the process's PIDs corresponds to a row in Win32_Service. They will
+    be None when the process is a standalone user app (browsers, Office) or
+    when the WMI query fails.
+
+    This is the field optimizer prompts MUST use for disable_service /
+    set_service_manual — the `name` field is the executable basename and
+    often differs from the Windows service Name (e.g. process name
+    'sspservice' but service name 'SophosEPDS').
+
+    Slow (~700-1000 ms — one Get-Counter call + one Win32_Service query).
+    Called only at optimizer cycle time, not from the 2-second poll loop.
+    """
+    # 1. CPU% + PID per process instance, via two synchronized PerfMon counters.
+    counter_cmd = (
+        "$cpu = (Get-Counter -Counter '\\Process(*)\\% Processor Time' "
+        "  -ErrorAction SilentlyContinue).CounterSamples; "
+        "$pids = (Get-Counter -Counter '\\Process(*)\\ID Process' "
+        "  -ErrorAction SilentlyContinue).CounterSamples; "
+        "$pidMap = @{}; "
+        "foreach ($s in $pids) { "
+        "  if ($s.InstanceName -notmatch '^(_total|idle)$') { "
+        "    $pidMap[$s.InstanceName] = [int]$s.CookedValue "
+        "  } "
+        "} "
+        "foreach ($s in $cpu) { "
+        "  if ($s.InstanceName -notmatch '^(_total|idle)$' "
+        "      -and $s.CookedValue -gt 0.5) { "
+        "    $p = if ($pidMap.ContainsKey($s.InstanceName)) "
+        "         { $pidMap[$s.InstanceName] } else { 0 }; "
+        "    '{0}|{1}|{2:N2}' -f $s.InstanceName, $p, $s.CookedValue "
+        "  } "
+        "}"
+    )
+    out = ps(counter_cmd, timeout=20)
+
+    # Merge per-instance samples by cleaned process name (strip #N suffix).
+    merged: dict[str, dict] = {}
+    for line in out.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            continue
+        iname, pid_s, cpu_s = parts
+        cpu = safe_float(cpu_s)
+        if cpu is None or cpu < 0.5:
+            continue
+        clean = re.sub(r"#\d+$", "", iname.strip())
+        entry = merged.setdefault(
+            clean, {"name": clean, "cpu_pct": 0.0, "pids": []}
+        )
+        entry["cpu_pct"] += cpu
+        pid_v = safe_float(pid_s)
+        if pid_v is not None and pid_v > 0:
+            entry["pids"].append(int(pid_v))
+
+    procs = sorted(merged.values(), key=lambda p: p["cpu_pct"], reverse=True)[:n]
+
+    # 2. PID → Windows service name mapping, from Win32_Service.
+    svc_cmd = (
+        "Get-CimInstance Win32_Service -ErrorAction SilentlyContinue "
+        "| Where-Object { $_.ProcessId -gt 0 } "
+        "| ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, $_.Name, $_.DisplayName }"
+    )
+    pid_to_service: dict[int, dict] = {}
+    try:
+        svc_out = ps(svc_cmd, timeout=20)
+    except Exception as e:
+        logger.warning("probe_top_processes: service map query failed: %s", e)
+        svc_out = ""
+
+    for line in svc_out.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            continue
+        pid_s, sname, sdisplay = parts
+        try:
+            pid_i = int(pid_s.strip())
+        except (ValueError, TypeError):
+            continue
+        # If multiple services share a PID (svchost), keep the first encountered.
+        if pid_i > 0 and pid_i not in pid_to_service:
+            pid_to_service[pid_i] = {
+                "service_name": sname.strip(),
+                "service_display_name": sdisplay.strip(),
+            }
+
+    # 3. Attach service info to each top process via the first PID that matches.
+    for p in procs:
+        matched = None
+        for pid in p.get("pids") or []:
+            if pid in pid_to_service:
+                matched = pid_to_service[pid]
+                break
+        p["pid"] = (p["pids"][0] if p.get("pids") else None)
+        p["service_name"] = matched["service_name"] if matched else None
+        p["service_display_name"] = matched["service_display_name"] if matched else None
+        # Don't leak internal accumulator
+        if "pids" in p:
+            del p["pids"]
+
+    return procs
+
+
+def probe_user_session():
+    """User-presence and session-state signals — what we can reliably tell
+    from a running Python process about whether the human is here, the
+    screen is on, and whether explorer.exe is running for them.
+
+    Returns:
+        {
+          "idle_s":            seconds since last keyboard/mouse input,
+          "idle_human":        "4h 12m 30s" formatted,
+          "screen_saver_on":   True if the screen saver is currently running,
+          "monitor_on":        True/False if we can tell, None if unsure,
+          "user_logged_in":    True iff explorer.exe is running (user shell up),
+          "username":          current console user,
+        }
+
+    All fields are best-effort — None when the underlying API isn't available.
+    """
+    import ctypes
+    import sys
+    from ctypes import wintypes
+
+    info = {}
+    if sys.platform != "win32":
+        return info
+
+    # ── idle time via GetLastInputInfo ──
+    class _LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+    try:
+        lii = _LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(lii)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+            tick = ctypes.windll.kernel32.GetTickCount()
+            idle_ms = max(0, tick - lii.dwTime)
+            info["idle_s"] = idle_ms // 1000
+            s = idle_ms // 1000
+            h, rem = divmod(s, 3600)
+            m, sec = divmod(rem, 60)
+            info["idle_human"] = (
+                f"{h}h{m:02d}m{sec:02d}s" if h else
+                f"{m}m{sec:02d}s" if m else f"{sec}s"
+            )
+    except Exception as e:
+        logger.debug("probe_user_session: GetLastInputInfo failed: %s", e)
+
+    # ── screen saver active? via SystemParametersInfoW ──
+    try:
+        SPI_GETSCREENSAVERRUNNING = 0x0072
+        running = wintypes.BOOL(False)
+        if ctypes.windll.user32.SystemParametersInfoW(
+            SPI_GETSCREENSAVERRUNNING, 0, ctypes.byref(running), 0
+        ):
+            info["screen_saver_on"] = bool(running.value)
+    except Exception as e:
+        logger.debug("probe_user_session: SPI_GETSCREENSAVERRUNNING failed: %s", e)
+
+    # ── monitor power state via Win32 ──
+    # We can't directly query "is the panel lit" from user-mode, but we CAN
+    # ask EnumDisplayMonitors how many monitors Windows considers active.
+    # When the laptop screen turns off (power-saving or lid closed), Windows
+    # typically drops it from the enumerated set.
+    try:
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT), wintypes.LPARAM,
+        )
+        count = [0]
+
+        def _cb(hMon, hdc, lprc, lParam):
+            count[0] += 1
+            return 1
+
+        if ctypes.windll.user32.EnumDisplayMonitors(0, None, MONITORENUMPROC(_cb), 0):
+            info["monitor_count"] = count[0]
+            info["monitor_on"] = count[0] > 0
+    except Exception as e:
+        logger.debug("probe_user_session: EnumDisplayMonitors failed: %s", e)
+
+    # ── username + logged-in check (explorer.exe running) ──
+    try:
+        info["username"] = os.environ.get("USERNAME", "?")
+        # Check for any running explorer.exe — quick stdlib subprocess.
+        out = ps(
+            "Get-Process explorer -ErrorAction SilentlyContinue | "
+            "Measure-Object | Select-Object -ExpandProperty Count"
+        )
+        n = safe_float(out)
+        info["user_logged_in"] = (n is not None and n > 0)
+        info["explorer_processes"] = int(n) if n is not None else None
+    except Exception as e:
+        logger.debug("probe_user_session: explorer check failed: %s", e)
+
+    return info
+
+
+def probe_power_requests():
+    """Run `powercfg /requests` and parse out what's actively blocking the
+    system from sleeping or the display from turning off. This is the most
+    direct diagnostic for "fans keep running when I leave my computer":
+    when DISPLAY or SYSTEM has non-empty entries, something is preventing
+    the OS from idling.
+
+    Returns:
+        {
+          "DISPLAY":   ["[PROCESS] chrome.exe", ...],    # keeps screen on
+          "SYSTEM":    [...],                            # keeps CPU/disk active
+          "AWAYMODE":  [...],
+          "EXECUTION": [...],                            # 'don't suspend me'
+          "PERFBOOST": [...],
+          "ACTIVELOCKSCREEN": [...],
+        }
+        Empty categories are kept as []. None when powercfg can't be run.
+    """
+    out = ps("powercfg /requests")
+    if not out:
+        return None
+
+    categories: dict[str, list[str]] = {}
+    current = None
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Section headers end with ":" (e.g. "DISPLAY:", "SYSTEM:")
+        if line.endswith(":") and " " not in line:
+            current = line[:-1]
+            categories[current] = []
+        elif current is not None and line != "None.":
+            # Compress to one line — strip Windows path noise.
+            entry = re.sub(r"\\Device\\HarddiskVolume\d+", "", line)
+            categories[current].append(entry)
+    return categories
 
 
 def probe_oem_sensors():

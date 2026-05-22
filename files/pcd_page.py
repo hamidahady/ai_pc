@@ -131,6 +131,62 @@ PAGE = r"""<!doctype html>
   .chat-input button { background: #1f6feb; color: white; border: none;
                        padding: 8px 16px; border-radius: 6px; cursor: pointer;
                        font-weight: 600; }
+
+  /* Diagnostic recording card */
+  .rec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+  .rec-interval { display: flex; gap: 4px; flex-wrap: wrap; }
+  .rec-interval button { background: #21262d; border: 1px solid #30363d; color: #e6edf3;
+                         padding: 4px 8px; border-radius: 4px; font-size: 0.8em; cursor: pointer; }
+  .rec-interval button.active { background: #1f6feb; border-color: #388bfd; color: #fff; }
+  button.rec-start { background: #2ea043; color: white; border: none;
+                     padding: 8px 14px; border-radius: 5px; font-weight: 600;
+                     cursor: pointer; font-size: 0.9em; }
+  button.rec-start:hover { background: #3fb950; }
+  button.rec-stop  { background: #da3633; color: white; border: none;
+                     padding: 8px 14px; border-radius: 5px; font-weight: 600;
+                     cursor: pointer; font-size: 0.9em; }
+  button.rec-stop:hover { background: #f85149; }
+  .rec-stat { color: #b1bac4; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+  .rec-file { color: #79c0ff; font-size: 0.82em;
+              font-family: Consolas, monospace; word-break: break-all; margin-top: 6px; }
+  .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+             background: #f85149; margin-right: 6px; vertical-align: middle;
+             animation: rec-pulse 1.4s ease-in-out infinite; }
+  @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* AI Auto-Optimize card */
+  .opt-state-badge { display: inline-block; padding: 3px 10px; border-radius: 4px;
+                     font-weight: 700; font-size: 0.85em; }
+  .opt-state-active     { background: #2ea043; color: white; }
+  .opt-state-working    { background: #f85149; color: white; }
+  .opt-state-brief_away { background: #d29922; color: #0f1419; }
+  .opt-state-long_away  { background: #db6d28; color: white; }
+  .opt-state-screen_off { background: #6e7681; color: white; }
+  .opt-state-locked     { background: #30363d; color: #f0f6fc; }
+  .opt-state-unknown    { background: #21262d; color: #7d8590; font-style: italic; font-weight: 400; }
+  .opt-reasoning { color: #b1bac4; font-size: 0.85em; margin-top: 8px;
+                   font-style: italic; line-height: 1.4; }
+  .opt-actions   { color: #b1bac4; font-size: 0.82em; margin-top: 6px;
+                   font-family: Consolas, monospace; }
+  .opt-meta { color: #7d8590; font-size: 0.78em; margin-top: 4px;
+              font-variant-numeric: tabular-nums; }
+  button.opt-start { background: #1f6feb; color: white; border: none;
+                     padding: 8px 14px; border-radius: 5px; font-weight: 600;
+                     cursor: pointer; font-size: 0.9em; }
+  button.opt-start:hover { background: #388bfd; }
+  button.opt-stop  { background: #da3633; color: white; border: none;
+                     padding: 8px 14px; border-radius: 5px; font-weight: 600;
+                     cursor: pointer; font-size: 0.9em; }
+  button.opt-stop:hover { background: #f85149; }
+  button.opt-runnow { background: #21262d; color: #79c0ff; border: 1px solid #30363d;
+                     padding: 6px 10px; border-radius: 5px; font-size: 0.82em;
+                     cursor: pointer; }
+  button.opt-runnow:hover { background: #2d333b; }
+  button.opt-runnow:disabled { opacity: 0.5; cursor: not-allowed; }
+  .opt-history { margin-top: 8px; max-height: 110px; overflow-y: auto;
+                 font-size: 0.78em; color: #b1bac4; }
+  .opt-history-row { padding: 3px 0; border-top: 1px dashed #30363d; }
+  .opt-history-row:first-child { border-top: none; }
 </style></head>
 <body>
 <h1>System Dashboard <small id="hostname" style="color:#7d8590;font-size:0.65em;font-weight:400"></small></h1>
@@ -152,6 +208,45 @@ PAGE = r"""<!doctype html>
       <button class="ctrl preset" data-preset="performance">Performance</button>
     </div>
     <div class="note">Combines cooling policy, turbo, CPU cap, GPU power, Win11 overlay.</div>
+  </div>
+
+  <div class="card"><h2>AI Auto-Optimize <small>Claude Code</small></h2>
+    <div class="rec-row">
+      <span class="rec-stat">Check every</span>
+      <div class="rec-interval" id="opt-interval">
+        <button data-iv="1">1 min</button>
+        <button data-iv="5">5 min</button>
+        <button data-iv="10">10 min</button>
+        <button data-iv="30" class="active">30 min</button>
+      </div>
+    </div>
+    <div class="rec-row" id="opt-controls"></div>
+    <div id="opt-state-line">
+      <span class="opt-state-badge opt-state-unknown" id="opt-state">idle</span>
+      <span class="opt-meta" id="opt-timing"></span>
+    </div>
+    <div class="opt-reasoning" id="opt-reasoning"></div>
+    <div class="opt-actions" id="opt-actions"></div>
+    <div class="opt-history" id="opt-history"></div>
+    <div class="note">Claude reads live state + recent recording + control log every N minutes and adjusts power settings to match how you're using the PC (active / away / locked / screen-off).</div>
+  </div>
+
+  <div class="card"><h2>Diagnostic Recording <small>pc_status_*.txt</small></h2>
+    <div class="rec-row">
+      <span class="rec-stat">Sample every</span>
+      <div class="rec-interval" id="rec-interval">
+        <button data-iv="5">5 s</button>
+        <button data-iv="10" class="active">10 s</button>
+        <button data-iv="30">30 s</button>
+        <button data-iv="60">1 min</button>
+      </div>
+    </div>
+    <div class="rec-row" id="rec-controls">
+      <button class="rec-start" id="rec-start-btn">● Start Recording</button>
+      <span class="rec-stat" id="rec-stat"></span>
+    </div>
+    <div class="rec-file" id="rec-file"></div>
+    <div class="note">Captures temperatures, fan speeds, CPU load, power state to a text file you can hand off for diagnosis (e.g. fans staying loud during idle).</div>
   </div>
   <div class="card"><h2>Power Plan <small>powercfg</small></h2>
     <div class="btn-group" id="powerplans"></div>
@@ -609,8 +704,11 @@ setInterval(refresh, REFRESH_MS);
 
   fetch('/api/chat/status').then(r => r.json()).then(s => {
     if (modelLbl && s.model) modelLbl.textContent = '· ' + s.model;
-    if (!s.sdk_installed) appendMsg('error', 'Anthropic SDK not installed: pip install anthropic');
-    else if (!s.api_key_set) appendMsg('error', 'ANTHROPIC_API_KEY is not set.');
+    if (s.active_source === 'claude_code_cli') {
+      appendMsg('tool', 'Connected via Claude Code CLI · uses your subscription, no API key needed.');
+    } else if (!s.claude_cli_available) {
+      appendMsg('error', 'Claude Code CLI not found on PATH. Install it from https://claude.com/code, then run "claude" once in a terminal to log in.');
+    }
   }).catch(() => {});
 
   fab.addEventListener('click', () => {
@@ -662,6 +760,242 @@ setInterval(refresh, REFRESH_MS);
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
+})();
+
+// ───────────────────────── Diagnostic recorder ─────────────────────────
+(function initRecorder() {
+  const ivGroup    = document.getElementById('rec-interval');
+  const controls   = document.getElementById('rec-controls');
+  const startBtn   = document.getElementById('rec-start-btn');
+  const statSpan   = document.getElementById('rec-stat');
+  const fileLine   = document.getElementById('rec-file');
+  let selectedIv = 10;
+
+  // Interval picker
+  ivGroup.addEventListener('click', e => {
+    const b = e.target.closest('button[data-iv]');
+    if (!b) return;
+    selectedIv = Number(b.dataset.iv);
+    ivGroup.querySelectorAll('button').forEach(x =>
+      x.classList.toggle('active', x === b));
+  });
+
+  function fmtElapsed(s) {
+    s = Math.floor(s || 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}h ${m}m ${sec}s`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  }
+
+  function renderState(s) {
+    if (!s || !s.active) {
+      // Idle — Start button enabled, no live stats
+      controls.innerHTML = '';
+      const btn = document.createElement('button');
+      btn.className = 'rec-start';
+      btn.id = 'rec-start-btn';
+      btn.textContent = '● Start Recording';
+      btn.addEventListener('click', startRecording);
+      controls.appendChild(btn);
+      statSpan.textContent = '';
+      controls.appendChild(statSpan);
+      fileLine.textContent = '';
+      return;
+    }
+    // Active — show stop button + live stats
+    controls.innerHTML = '';
+    const btn = document.createElement('button');
+    btn.className = 'rec-stop';
+    btn.textContent = '■ Stop Recording';
+    btn.addEventListener('click', stopRecording);
+    controls.appendChild(btn);
+    const stat = document.createElement('span');
+    stat.className = 'rec-stat';
+    stat.innerHTML = `<span class="rec-dot"></span> ${s.samples} samples · ${fmtElapsed(s.elapsed_s)} · every ${s.interval_s}s`;
+    controls.appendChild(stat);
+    fileLine.textContent = s.file || '';
+  }
+
+  async function startRecording() {
+    try {
+      const r = await fetch('/api/recorder/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({interval_s: selectedIv}),
+      });
+      const d = await r.json();
+      if (!d.ok) flash(d.error || 'could not start', true);
+      else flash('Recording started');
+      pollStatus();
+    } catch (e) { flash(String(e), true); }
+  }
+
+  async function stopRecording() {
+    try {
+      const r = await fetch('/api/recorder/stop', {method: 'POST'});
+      const d = await r.json();
+      if (!d.ok) flash(d.error || 'could not stop', true);
+      else flash(`Saved ${d.samples} samples (${fmtElapsed(d.duration_s)})`);
+      pollStatus();
+    } catch (e) { flash(String(e), true); }
+  }
+
+  async function pollStatus() {
+    try {
+      const r = await fetch('/api/recorder/status');
+      const s = await r.json();
+      renderState(s);
+    } catch (e) {
+      // ignore — recorder is optional
+    }
+  }
+
+  pollStatus();
+  setInterval(pollStatus, 2000);
+})();
+
+// ───────────────────────── AI Auto-Optimize ─────────────────────────
+(function initOptimizer() {
+  const ivGroup     = document.getElementById('opt-interval');
+  const controls    = document.getElementById('opt-controls');
+  const stateBadge  = document.getElementById('opt-state');
+  const timing      = document.getElementById('opt-timing');
+  const reasonLine  = document.getElementById('opt-reasoning');
+  const actionsLine = document.getElementById('opt-actions');
+  const historyBox  = document.getElementById('opt-history');
+  let selectedIv = 30;
+
+  ivGroup.addEventListener('click', e => {
+    const b = e.target.closest('button[data-iv]');
+    if (!b) return;
+    selectedIv = Number(b.dataset.iv);
+    ivGroup.querySelectorAll('button').forEach(x =>
+      x.classList.toggle('active', x === b));
+  });
+
+  function fmtState(s) {
+    if (!s) return ['unknown', 'idle'];
+    const klass = 'opt-state-' + s.replace(/[^a-z_]/g, '');
+    const label = s.replace(/_/g, ' ');
+    return [klass, label];
+  }
+
+  function renderActions(actions, results) {
+    if (!actions || !actions.length) return '(no changes)';
+    return actions.map((a, i) => {
+      const r = (results && results[i]) || {};
+      const status = r.skipped ? '↷ skipped' : (r.ok ? '✓' : '✗');
+      const args = a.args ? JSON.stringify(a.args) : '';
+      const err = (!r.ok && r.error) ? ` (${r.error})` : '';
+      return `${status} ${a.name}${args ? ' ' + args : ''}${err}`;
+    }).join('  ');
+  }
+
+  function renderState(s) {
+    if (!s) return;
+    // Toggle Start/Stop button
+    controls.innerHTML = '';
+    if (!s.active) {
+      const startBtn = document.createElement('button');
+      startBtn.className = 'opt-start';
+      startBtn.textContent = 'Start Auto-Optimize';
+      startBtn.addEventListener('click', start);
+      controls.appendChild(startBtn);
+    } else {
+      const stopBtn = document.createElement('button');
+      stopBtn.className = 'opt-stop';
+      stopBtn.textContent = 'Stop';
+      stopBtn.addEventListener('click', stop);
+      controls.appendChild(stopBtn);
+    }
+    const runNowBtn = document.createElement('button');
+    runNowBtn.className = 'opt-runnow';
+    runNowBtn.textContent = 'Run Once Now';
+    runNowBtn.addEventListener('click', runNow);
+    controls.appendChild(runNowBtn);
+
+    // State badge
+    const ld = s.last_decision;
+    if (ld) {
+      const [klass, label] = fmtState(ld.state);
+      stateBadge.className = 'opt-state-badge ' + klass;
+      stateBadge.textContent = label + (ld.confidence ? ` · ${ld.confidence}` : '');
+      reasonLine.textContent = ld.reasoning || '';
+      actionsLine.textContent = renderActions(ld.actions, ld.results);
+    } else {
+      stateBadge.className = 'opt-state-badge opt-state-unknown';
+      stateBadge.textContent = s.active ? 'running…' : 'idle';
+      reasonLine.textContent = '';
+      actionsLine.textContent = '';
+    }
+
+    // Timing
+    const bits = [];
+    if (s.active) bits.push(`every ${s.interval_minutes} min`);
+    if (s.last_run_at) bits.push(`last: ${s.last_run_at}`);
+    if (s.active && s.next_run_at) bits.push(`next: ${s.next_run_at}`);
+    timing.textContent = bits.join(' · ');
+
+    // History
+    const hist = (s.history || []).slice(-6).reverse();
+    historyBox.innerHTML = hist.map(h => {
+      const [klass] = fmtState(h.state || 'unknown');
+      const state = h.state || (h.error ? 'error' : 'unknown');
+      const reason = h.error || h.reasoning || '';
+      return `<div class="opt-history-row"><span class="opt-state-badge ${klass}" style="font-size:0.75em">${esc(state)}</span> <span style="color:#7d8590">${esc(h.started_at || '')}</span> ${esc(reason.slice(0, 100))}</div>`;
+    }).join('');
+  }
+
+  async function start() {
+    try {
+      const r = await fetch('/api/optimizer/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({interval_minutes: selectedIv}),
+      });
+      const d = await r.json();
+      if (!d.ok) flash(d.error || 'could not start', true);
+      else flash('AI Auto-Optimize started');
+      poll();
+    } catch (e) { flash(String(e), true); }
+  }
+
+  async function stop() {
+    try {
+      const r = await fetch('/api/optimizer/stop', {method: 'POST'});
+      const d = await r.json();
+      if (!d.ok) flash(d.error || 'could not stop', true);
+      else flash('Auto-Optimize stopped');
+      poll();
+    } catch (e) { flash(String(e), true); }
+  }
+
+  async function runNow() {
+    flash('Asking Claude…');
+    try {
+      const r = await fetch('/api/optimizer/run-now', {method: 'POST'});
+      const d = await r.json();
+      if (!d.ok) flash(d.error || 'run failed', true);
+      else flash(`Claude → ${d.state || '?'}`);
+      poll();
+    } catch (e) { flash(String(e), true); }
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/optimizer/status');
+      const s = await r.json();
+      renderState(s);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  poll();
+  setInterval(poll, 3000);
 })();
 </script>
 </body></html>"""
